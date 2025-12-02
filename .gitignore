@@ -12,3 +12,7 @@ __pycache__/
 # Ignore model/training files (optional)
 *.h5
 *.ckpt
+
+*.png
+*.jpg
+ocr_results.txt

@@ -8,7 +8,7 @@ def display_board(board):
     for row in board:
         print(" ".join(str(num) for num in row))
 
-def main(image_path):
+def main(image_path, debug=False):
     image = cv2.imread(image_path)
     if image is None:
         print("Error: Image not found.")
@@ -23,7 +23,10 @@ def main(image_path):
         return
 
     digits = extract_digits(grid)
-    board = recognize_digits(digits)
+    debug_dir = None
+    if debug:
+        debug_dir = 'debug_output'
+    board = recognize_digits(digits, debug_dir=debug_dir)
 
     print("Initial Sudoku board detected:")
     display_board(board)
@@ -39,7 +42,10 @@ def main(image_path):
         print("No solution exists.")
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python main.py path_to_sudoku_image")
+    # Usage: python main.py path_to_sudoku_image [--debug]
+    if len(sys.argv) < 2:
+        print("Usage: python main.py path_to_sudoku_image [--debug]")
     else:
-        main(sys.argv[1])
+        img_path = sys.argv[1]
+        debug_flag = '--debug' in sys.argv[2:]
+        main(img_path, debug=debug_flag)

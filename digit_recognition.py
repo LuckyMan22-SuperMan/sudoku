@@ -5,7 +5,7 @@ import numpy as np
 pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"
 
 
-def extract_digit(cell):
+def extract_digit(cell, debug_dir=None, row=None, col=None):
     """Return recognized digit (1-9) from a cell image or 0 if empty/unknown.
 
     The function:
@@ -41,15 +41,31 @@ def extract_digit(cell):
 
     # Find contours - keep largest contour as digit
     contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
+    contour_count = len(contours)
+
+    if contour_count == 0:
+        # Debug: save thresh and return 0
+        if 'debug_dir' in locals() and debug_dir is not None and row is not None and col is not None:
+            import os
+            os.makedirs(debug_dir, exist_ok=True)
+            cv2.imwrite(os.path.join(debug_dir, f'cell_{row}_{col}_thresh.png'), thresh)
+            with open(os.path.join(debug_dir, 'ocr_results.txt'), 'a') as f:
+                f.write(f'cell_{row}_{col}: NO_CONTOURS\n')
         return 0
 
     c = max(contours, key=cv2.contourArea)
     x, y, w, h = cv2.boundingRect(c)
 
-    # Reject extremely small areas
-    if w * h < 30:
-        return 0
+    # Reject extremely small areas (allow smaller than before)
+    if w * h < 20:
+        # If debugging, still attempt OCR on whole canvas as fallback
+        if 'debug_dir' in locals() and debug_dir is not None and row is not None and col is not None:
+            import os
+            os.makedirs(debug_dir, exist_ok=True)
+            cv2.imwrite(os.path.join(debug_dir, f'cell_{row}_{col}_thresh.png'), thresh)
+            with open(os.path.join(debug_dir, 'ocr_results.txt'), 'a') as f:
+                f.write(f'cell_{row}_{col}: SMALL_CONTOUR area={w*h}\n')
+        # continue to try OCR on the whole processed canvas below as fallback
 
     roi = thresh[y:y + h, x:x + w]
 
@@ -68,29 +84,114 @@ def extract_digit(cell):
     # Add white border to give Tesseract some margin
     canvas = cv2.copyMakeBorder(canvas, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=255)
 
-    # OCR config: single character digits 1-9
-    config = "--psm 10 -c tessedit_char_whitelist=123456789"
+    # Prepare debug saving helper
+    def save_debug(name, img):
+        if debug_dir is not None and row is not None and col is not None:
+            import os
+            os.makedirs(debug_dir, exist_ok=True)
+            cv2.imwrite(os.path.join(debug_dir, f'cell_{row}_{col}_{name}.png'), img)
 
-    text = pytesseract.image_to_string(canvas, config=config).strip()
-    text = text.replace('\n', '').replace(' ', '')
+    save_debug('pre_thresh', cell_gray)
+    save_debug('thresh', thresh)
+    save_debug('roi', roi)
+    save_debug('roi_resized', roi_resized)
+    save_debug('canvas', canvas)
 
-    if len(text) == 0:
+    # Try multiple OCR configs as fallbacks and log attempts
+    configs = [
+        ("--psm 10 -c tessedit_char_whitelist=123456789", 'psm10'),
+        ("--psm 8 -c tessedit_char_whitelist=123456789", 'psm8'),
+        ("--psm 7 -c tessedit_char_whitelist=123456789", 'psm7')
+    ]
+
+    ocr_text = ''
+    ocr_used = None
+    for cfg, name in configs:
+        text_try = pytesseract.image_to_string(canvas, config=cfg).strip()
+        text_try = text_try.replace('\n', '').replace(' ', '')
+        if debug_dir is not None and row is not None and col is not None:
+            with open(os.path.join(debug_dir, 'ocr_results.txt'), 'a') as f:
+                f.write(f'cell_{row}_{col} [{name}]: "{text_try}"\n')
+        if len(text_try) > 0 and text_try.isdigit():
+            ocr_text = text_try
+            ocr_used = name
+            break
+
+    # As extra fallback, try OCR on inverted canvas
+    if ocr_text == '':
+        inv = cv2.bitwise_not(canvas)
+        save_debug('canvas_inverted', inv)
+        for cfg, name in configs:
+            text_try = pytesseract.image_to_string(inv, config=cfg).strip()
+            text_try = text_try.replace('\n', '').replace(' ', '')
+            if debug_dir is not None and row is not None and col is not None:
+                with open(os.path.join(debug_dir, 'ocr_results.txt'), 'a') as f:
+                    f.write(f'cell_{row}_{col} [inv-{name}]: "{text_try}"\n')
+            if len(text_try) > 0 and text_try.isdigit():
+                ocr_text = text_try
+                ocr_used = 'inv-' + name
+                break
+
+    # If still empty, try OCR on the original cell area (uncropped) as last resort
+    if ocr_text == '':
+        try:
+            orig_canvas = cv2.copyMakeBorder(cell_gray, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=255)
+            save_debug('orig_canvas', orig_canvas)
+            for cfg, name in configs:
+                text_try = pytesseract.image_to_string(orig_canvas, config=cfg).strip()
+                text_try = text_try.replace('\n', '').replace(' ', '')
+                if debug_dir is not None and row is not None and col is not None:
+                    with open(os.path.join(debug_dir, 'ocr_results.txt'), 'a') as f:
+                        f.write(f'cell_{row}_{col} [orig-{name}]: "{text_try}"\n')
+                if len(text_try) > 0 and text_try.isdigit():
+                    ocr_text = text_try
+                    ocr_used = 'orig-' + name
+                    break
+        except Exception:
+            pass
+
+    # Final logging of result
+    if debug_dir is not None and row is not None and col is not None:
+        import os
+        with open(os.path.join(debug_dir, 'ocr_results.txt'), 'a') as f:
+            f.write(f'cell_{row}_{col}: FINAL "{ocr_text}" used={ocr_used}\n')
+
+    if len(ocr_text) == 0:
         return 0
-    if text.isdigit():
-        num = int(text)
+    if ocr_text.isdigit():
+        num = int(ocr_text)
         return num if 1 <= num <= 9 else 0
     return 0
 
-def recognize_digits(digits_grid):
+def recognize_digits(digits_grid, debug_dir=None):
     recognized_grid = []
+
+    # Clear previous debug results if requested
+    if debug_dir is not None:
+        import os
+        if os.path.exists(debug_dir):
+            # remove old files
+            for fname in os.listdir(debug_dir):
+                path = os.path.join(debug_dir, fname)
+                try:
+                    if os.path.isfile(path):
+                        os.remove(path)
+                except Exception:
+                    pass
 
     for row_idx, row in enumerate(digits_grid):
         recognized_row = []
         for col_idx, cell in enumerate(row):
             if cell is not None:
-                digit = extract_digit(cell)
+                digit = extract_digit(cell, debug_dir=debug_dir, row=row_idx, col=col_idx)
                 recognized_row.append(digit)
             else:
+                # Optionally record empty cells in debug log
+                if debug_dir is not None:
+                    import os
+                    os.makedirs(debug_dir, exist_ok=True)
+                    with open(os.path.join(debug_dir, 'ocr_results.txt'), 'a') as f:
+                        f.write(f'cell_{row_idx}_{col_idx}: EMPTY\n')
                 recognized_row.append(0)
         recognized_grid.append(recognized_row)
 
