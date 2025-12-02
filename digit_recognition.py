@@ -1,6 +1,7 @@
 import pytesseract
 import cv2
 import numpy as np
+import os
 
 pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"
 
@@ -23,8 +24,33 @@ def extract_digit(cell, debug_dir=None, row=None, col=None):
     else:
         cell_gray = cell.copy()
 
-    # Resize to a working size (keep some detail)
-    cell_gray = cv2.resize(cell_gray, (28, 28), interpolation=cv2.INTER_AREA)
+    # Keep original cell size (warped grid gives reasonable resolution);
+    # we'll resize the digit ROI later to 28x28 for OCR.
+
+    # Quick pre-check: ensure the cell contains enough ink before attempting
+    # heavy processing / OCR. This avoids OCR on nearly-empty cells that cause
+    # false positives.
+    try:
+        tmp_thresh = cv2.adaptiveThreshold(
+            cell_gray, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV,
+            11, 2
+        )
+        ink_pixels = cv2.countNonZero(tmp_thresh)
+        ink_rel = ink_pixels / float(tmp_thresh.size)
+        if ink_pixels < max(150, 0.02 * tmp_thresh.size) or ink_rel < 0.01:
+            # Very little ink — treat as empty
+            return 0
+    except Exception:
+        pass
+
+    # Improve local contrast (CLAHE) then threshold using Otsu
+    try:
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        cell_gray = clahe.apply(cell_gray)
+    except Exception:
+        pass
 
     # Threshold using Otsu to get a clean binary image
     _, thresh = cv2.threshold(cell_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -45,8 +71,7 @@ def extract_digit(cell, debug_dir=None, row=None, col=None):
 
     if contour_count == 0:
         # Debug: save thresh and return 0
-        if 'debug_dir' in locals() and debug_dir is not None and row is not None and col is not None:
-            import os
+        if debug_dir is not None and row is not None and col is not None:
             os.makedirs(debug_dir, exist_ok=True)
             cv2.imwrite(os.path.join(debug_dir, f'cell_{row}_{col}_thresh.png'), thresh)
             with open(os.path.join(debug_dir, 'ocr_results.txt'), 'a') as f:
@@ -59,8 +84,7 @@ def extract_digit(cell, debug_dir=None, row=None, col=None):
     # Reject extremely small areas (allow smaller than before)
     if w * h < 20:
         # If debugging, still attempt OCR on whole canvas as fallback
-        if 'debug_dir' in locals() and debug_dir is not None and row is not None and col is not None:
-            import os
+        if debug_dir is not None and row is not None and col is not None:
             os.makedirs(debug_dir, exist_ok=True)
             cv2.imwrite(os.path.join(debug_dir, f'cell_{row}_{col}_thresh.png'), thresh)
             with open(os.path.join(debug_dir, 'ocr_results.txt'), 'a') as f:
@@ -87,7 +111,6 @@ def extract_digit(cell, debug_dir=None, row=None, col=None):
     # Prepare debug saving helper
     def save_debug(name, img):
         if debug_dir is not None and row is not None and col is not None:
-            import os
             os.makedirs(debug_dir, exist_ok=True)
             cv2.imwrite(os.path.join(debug_dir, f'cell_{row}_{col}_{name}.png'), img)
 
@@ -99,6 +122,9 @@ def extract_digit(cell, debug_dir=None, row=None, col=None):
 
     # Try multiple OCR configs as fallbacks and log attempts
     configs = [
+        ("--oem 1 --psm 10 -c tessedit_char_whitelist=123456789", 'oem1-psm10'),
+        ("--oem 1 --psm 8 -c tessedit_char_whitelist=123456789", 'oem1-psm8'),
+        ("--oem 1 --psm 7 -c tessedit_char_whitelist=123456789", 'oem1-psm7'),
         ("--psm 10 -c tessedit_char_whitelist=123456789", 'psm10'),
         ("--psm 8 -c tessedit_char_whitelist=123456789", 'psm8'),
         ("--psm 7 -c tessedit_char_whitelist=123456789", 'psm7')
@@ -152,7 +178,6 @@ def extract_digit(cell, debug_dir=None, row=None, col=None):
 
     # Final logging of result
     if debug_dir is not None and row is not None and col is not None:
-        import os
         with open(os.path.join(debug_dir, 'ocr_results.txt'), 'a') as f:
             f.write(f'cell_{row}_{col}: FINAL "{ocr_text}" used={ocr_used}\n')
 

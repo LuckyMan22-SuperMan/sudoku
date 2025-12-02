@@ -77,14 +77,32 @@ def extract_digits(grid_gray):
     thresholding on each cell to decide if a digit is present.
     """
     cell_size = grid_gray.shape[0] // 9
-    digits = []
 
+    # Remove grid lines from the grayscale image to help OCR. We detect strong
+    # horizontal and vertical lines using morphology on a binary version, then
+    # inpaint the grayscale image at those line locations.
+    _, bw = cv2.threshold(grid_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # Kernel sizes relative to image size
+    horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(3, grid_gray.shape[1] // 15), 1))
+    vert_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(3, grid_gray.shape[0] // 15)))
+
+    detect_h = cv2.morphologyEx(bw, cv2.MORPH_OPEN, horiz_kernel, iterations=1)
+    detect_v = cv2.morphologyEx(bw, cv2.MORPH_OPEN, vert_kernel, iterations=1)
+
+    lines_mask = cv2.bitwise_or(detect_h, detect_v)
+
+    # Inpaint the original grayscale image to remove the detected lines
+    inpaint_mask = lines_mask
+    cleaned = cv2.inpaint(grid_gray, inpaint_mask, 3, cv2.INPAINT_TELEA)
+
+    digits = []
     for row in range(9):
         digits_row = []
         for col in range(9):
             x, y = col * cell_size, row * cell_size
-            cell = grid_gray[y:y + cell_size, x:x + cell_size]
-            # locally threshold cell to detect ink
+            cell = cleaned[y:y + cell_size, x:x + cell_size]
+            # locally threshold cell to detect ink (after line removal)
             cell_thresh = cv2.adaptiveThreshold(
                 cell, 255,
                 cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -93,7 +111,11 @@ def extract_digits(grid_gray):
             )
             nonzero = cv2.countNonZero(cell_thresh)
             # If a reasonable fraction of pixels are non-zero, assume a digit exists
-            if nonzero > (cell_size * cell_size * 0.01):  # >1% area
+            # Use both a relative threshold (3%) and an absolute pixel minimum to
+            # reduce false positives on empty cells with noise.
+            rel_thresh = cell_size * cell_size * 0.03
+            abs_min = 150
+            if nonzero > max(rel_thresh, abs_min):
                 digits_row.append(cell)
             else:
                 digits_row.append(None)
